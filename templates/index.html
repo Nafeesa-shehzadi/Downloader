@@ -193,7 +193,30 @@
             margin-right: 8px;
         }
         
-        .location-note {
+        .stream-download-btn {
+            display: block;
+            margin-top: 15px;
+            padding: 12px 20px;
+            background-color: #007bff;
+            color: white;
+            text-decoration: none;
+            border-radius: var(--border-radius);
+            font-weight: 500;
+            text-align: center;
+            transition: background-color 0.3s;
+        }
+        
+        .stream-download-btn:hover {
+            background-color: #0056b3;
+            text-decoration: none;
+            color: white;
+        }
+        
+        .stream-download-btn i {
+            margin-right: 8px;
+        }
+        
+        .note-text {
             display: block;
             margin-top: 10px;
             padding: 10px 15px;
@@ -204,7 +227,7 @@
             text-align: center;
         }
         
-        .location-note i {
+        .note-text i {
             margin-right: 8px;
             color: #007bff;
         }
@@ -600,17 +623,25 @@
                     successIcon.classList.remove('hidden');
                     statusMessage.textContent = 'Download completed successfully!';
                     
-                    // Display a success message with the downloaded filename
+                    // Display a success message
                     const downloadMessage = document.createElement('div');
                     downloadMessage.className = 'download-message';
                     downloadMessage.innerHTML = `<i class="fas fa-check-circle"></i> ${data.message}`;
                     downloadResult.appendChild(downloadMessage);
                     
-                    // Add a small note about where to find the file
-                    const locationNote = document.createElement('div');
-                    locationNote.className = 'location-note';
-                    locationNote.innerHTML = `<i class="fas fa-folder-open"></i> Check your Downloads folder for <b>${data.filename || 'your downloaded file'}</b>`;
-                    downloadResult.appendChild(locationNote);
+                    // Create a download button for the direct stream
+                    const downloadBtn = document.createElement('a');
+                    downloadBtn.className = 'stream-download-btn';
+                    downloadBtn.href = data.download_url;
+                    downloadBtn.innerHTML = `<i class="fas fa-download"></i> Download ${data.filename}`;
+                    downloadBtn.download = data.filename; // Suggest filename to browser
+                    downloadResult.appendChild(downloadBtn);
+                    
+                    // Add a note that clicking will start the download
+                    const noteText = document.createElement('div');
+                    noteText.className = 'note-text';
+                    noteText.innerHTML = `<i class="fas fa-info-circle"></i> Click the button above to download directly to your device`;
+                    downloadResult.appendChild(noteText);
                 })
                 .catch(error => {
                     // Show error
