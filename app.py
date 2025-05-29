@@ -1,10 +1,12 @@
-from flask import Flask, render_template, request, jsonify, send_from_directory
-import yt_dlp
 import os
 import uuid
-import re
-import traceback
 import subprocess
+import traceback
+import yt_dlp
+from flask import Flask, render_template, request, jsonify, send_from_directory
+
+# Import our YouTube helper module with enhanced anti-bot protection
+import youtube_helper
 
 app = Flask(__name__)
 
@@ -35,14 +37,18 @@ def download_video():
         video_info = None
         file_extension = 'mp4'  # Default extension
         
-        # Basic configuration for info extraction
-        info_opts = {
-            'format': 'best',
-            'noplaylist': True,
-            'restrictfilenames': True,
-            'skip_download': True,  # Just get info first
-            'quiet': True
-        }
+        try:
+            # Use our enhanced YouTube helper to get video info with anti-bot protection
+            print(f"Getting info for {video_url} with enhanced protection")
+            video_info = youtube_helper.extract_video_info(
+                video_url, 
+                format_type=format_type,
+                quality=quality,
+                skip_download=True
+            )
+        except Exception as e:
+            print(f"Error with enhanced protection: {str(e)}")
+            return jsonify({"error": f"YouTube is blocking this request. Please try again later or with a different video."}), 500
         
         # Special format configuration for audio
         if format_type == 'audio':
@@ -108,58 +114,79 @@ def stream_download():
         return "No URL provided", 400
     
     try:
-        # Get video info first
-        info_opts = {
-            'format': 'best',
-            'noplaylist': True,
-            'restrictfilenames': True,
-        }
-        
-        # Configure for audio/video and quality
-        if format_type == 'audio':
-            info_opts.update({'format': 'bestaudio'})
-            # Check if FFmpeg is available
-            try:
-                subprocess_result = subprocess.run(['ffmpeg', '-version'], 
-                                                stdout=subprocess.PIPE, 
-                                                stderr=subprocess.PIPE, 
-                                                shell=True)
-                ffmpeg_available = subprocess_result.returncode == 0
-            except:
-                ffmpeg_available = False
-                
-            if ffmpeg_available:
-                info_opts.update({
-                    'postprocessors': [{
-                        'key': 'FFmpegExtractAudio',
-                        'preferredcodec': 'mp3',
-                        'preferredquality': '256',
-                    }],
-                })
-        elif quality != 'best':
-            if quality == '1080':
-                info_opts.update({'format': 'best[height<=1080]'})
-            elif quality == '720':
-                info_opts.update({'format': 'best[height<=720]'})
-            elif quality == '480':
-                info_opts.update({'format': 'best[height<=480]'})
-        
         # Create temporary file path
         temp_file = os.path.join(DOWNLOAD_FOLDER, f"temp_{uuid.uuid4()}.{'.mp3' if format_type == 'audio' else '.mp4'}")
-        info_opts['outtmpl'] = temp_file
         
-        # Download the file
-        with yt_dlp.YoutubeDL(info_opts) as ydl:
-            info = ydl.extract_info(video_url, download=True)
+        try:
+            # Use enhanced YouTube helper to download with anti-bot protection
+            print(f"Downloading {video_url} with enhanced protection")
             
-            # Get actual filename (might be different from temp_file due to conversion)
-            if 'requested_downloads' in info and info['requested_downloads']:
-                downloaded_file = info['requested_downloads'][0].get('_filename', temp_file)
-            else:
-                downloaded_file = temp_file
-                
-            if not os.path.exists(downloaded_file):
-                return "Download failed", 500
+            # Basic download options
+            base_opts = {
+                'outtmpl': temp_file,
+                'quiet': False,  # Let's see output for debugging
+            }
+            
+            # Add audio post-processing if needed
+            if format_type == 'audio':
+                # Check if FFmpeg is available
+                try:
+                    subprocess_result = subprocess.run(['ffmpeg', '-version'], 
+                                                    stdout=subprocess.PIPE, 
+                                                    stderr=subprocess.PIPE, 
+                                                    shell=True)
+                    ffmpeg_available = subprocess_result.returncode == 0
+                    
+                    if ffmpeg_available:
+                        base_opts.update({
+                            'postprocessors': [{
+                                'key': 'FFmpegExtractAudio',
+                                'preferredcodec': 'mp3',
+                                'preferredquality': '256',
+                            }],
+                        })
+                except:
+                    pass
+        
+        # Get download format based on quality selection
+        if quality != 'best' and format_type == 'video':
+            if quality == '1080':
+                base_opts.update({'format': 'best[height<=1080]'})
+            elif quality == '720':
+                base_opts.update({'format': 'best[height<=720]'})
+            elif quality == '480':
+                base_opts.update({'format': 'best[height<=480]'})
+        
+        # Enhance options with anti-bot protection
+        enhanced_opts = youtube_helper.get_enhanced_ydl_opts(base_opts, format_type)
+        
+        # Download the file with multiple attempts if needed
+        downloaded_file = None
+        info = None
+        
+        for attempt in range(3):
+            try:
+                with yt_dlp.YoutubeDL(enhanced_opts) as ydl:
+                    # Verbose output for debugging
+                    print(f"Download attempt {attempt+1} with options: {enhanced_opts}")
+                    info = ydl.extract_info(video_url, download=True)
+                    
+                    # Check if download succeeded
+                    if info and 'requested_downloads' in info and info['requested_downloads']:
+                        downloaded_file = info['requested_downloads'][0].get('_filename', temp_file)
+                        if os.path.exists(downloaded_file):
+                            print(f"Successfully downloaded on attempt {attempt+1}")
+                            break
+                    else:
+                        print(f"Download info not available in attempt {attempt+1}")
+            except Exception as e:
+                print(f"Error in download attempt {attempt+1}: {str(e)}")
+                # Try with different settings on next attempt
+                enhanced_opts = youtube_helper.get_enhanced_ydl_opts(base_opts, format_type)
+        
+        # Check if any of the attempts succeeded
+        if not downloaded_file or not os.path.exists(downloaded_file):
+            return "Download failed after multiple attempts. YouTube may be blocking access.", 500
                 
             # Generate a safe filename for the browser
             safe_title = ''.join(c for c in info['title'] if c.isalnum() or c in ' -_').strip()
