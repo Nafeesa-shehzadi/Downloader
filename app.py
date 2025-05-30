@@ -50,6 +50,15 @@ def download_video():
             print(f"Error with enhanced protection: {str(e)}")
             return jsonify({"error": f"YouTube is blocking this request. Please try again later or with a different video."}), 500
         
+        # Define basic info options
+        info_opts = {
+            'format': 'best',
+            'noplaylist': True,
+            'restrictfilenames': True,
+            'quiet': True,
+            'skip_download': True
+        }
+        
         # Special format configuration for audio
         if format_type == 'audio':
             info_opts.update({'format': 'bestaudio'})
@@ -117,36 +126,34 @@ def stream_download():
         # Create temporary file path
         temp_file = os.path.join(DOWNLOAD_FOLDER, f"temp_{uuid.uuid4()}.{'.mp3' if format_type == 'audio' else '.mp4'}")
         
-        try:
-            # Use enhanced YouTube helper to download with anti-bot protection
-            print(f"Downloading {video_url} with enhanced protection")
-            
-            # Basic download options
-            base_opts = {
-                'outtmpl': temp_file,
-                'quiet': False,  # Let's see output for debugging
-            }
-            
-            # Add audio post-processing if needed
-            if format_type == 'audio':
-                # Check if FFmpeg is available
-                try:
-                    subprocess_result = subprocess.run(['ffmpeg', '-version'], 
-                                                    stdout=subprocess.PIPE, 
-                                                    stderr=subprocess.PIPE, 
-                                                    shell=True)
-                    ffmpeg_available = subprocess_result.returncode == 0
-                    
-                    if ffmpeg_available:
-                        base_opts.update({
-                            'postprocessors': [{
-                                'key': 'FFmpegExtractAudio',
-                                'preferredcodec': 'mp3',
-                                'preferredquality': '256',
-                            }],
-                        })
-                except:
-                    pass
+        # Basic download options
+        base_opts = {
+            'outtmpl': temp_file,
+            'quiet': False,  # Let's see output for debugging
+        }
+        
+        print(f"Downloading {video_url} with enhanced protection")
+        
+        # Add audio post-processing if needed
+        if format_type == 'audio':
+            # Check if FFmpeg is available
+            try:
+                subprocess_result = subprocess.run(['ffmpeg', '-version'], 
+                                                stdout=subprocess.PIPE, 
+                                                stderr=subprocess.PIPE, 
+                                                shell=True)
+                ffmpeg_available = subprocess_result.returncode == 0
+                
+                if ffmpeg_available:
+                    base_opts.update({
+                        'postprocessors': [{
+                            'key': 'FFmpegExtractAudio',
+                            'preferredcodec': 'mp3',
+                            'preferredquality': '256',
+                        }],
+                    })
+            except:
+                pass
         
         # Get download format based on quality selection
         if quality != 'best' and format_type == 'video':
