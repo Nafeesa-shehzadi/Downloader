@@ -595,7 +595,7 @@
                 // Use the URL directly without conversion
                 let processedUrl = videoUrl;
                 
-                // Send request to server
+                // Send request to server - first step: get video info
                 fetch('/download', {
                     method: 'POST',
                     headers: {
@@ -608,8 +608,56 @@
                     }),
                 })
                 .then(response => {
-                    progressBar.style.width = '70%';
+                    progressBar.style.width = '30%';
+                    
+                    // Check if response is OK first
+                    if (!response.ok) {
+                        if (response.status === 429) {
+                            throw new Error("YouTube's anti-bot protection is active. Please try again later.");
+                        } else if (response.status === 404) {
+                            throw new Error("Video not found or unavailable.");
+                        } else if (response.status === 500) {
+                            throw new Error("Server error. The application might be experiencing high traffic.");
+                        } else {
+                            throw new Error(`Server returned ${response.status}: ${response.statusText}`);
+                        }
+                    }
+                    
                     return response.json();
+                })
+                .then(data => {
+                    progressBar.style.width = '40%';
+                    
+                    if (data.error) {
+                        throw new Error(data.error);
+                    }
+                    
+                    // Check if we need to use the new async download system
+                    if (data.redirect && data.redirect.startsWith('/initiate-download')) {
+                        // Start the async download process
+                        return fetch(data.redirect);
+                    } else if (data.download_url) {
+                        // The old system returned a direct download URL, use it
+                        return { json: () => Promise.resolve(data) };
+                    } else {
+                        throw new Error('Invalid response from server');
+                    }
+                })
+                .then(response => {
+                    progressBar.style.width = '50%';
+                    return response.json();
+                })
+                .then(data => {
+                    // Check if this is a job ID from the async system
+                    if (data.job_id) {
+                        // Start polling for job status
+                        statusMessage.textContent = 'Download in progress. Please wait...';
+                        return pollDownloadStatus(data.job_id);
+                    } else {
+                        // Direct response with download URL
+                        progressBar.style.width = '100%';
+                        return data;
+                    }
                 })
                 .then(data => {
                     progressBar.style.width = '100%';
@@ -623,25 +671,39 @@
                     successIcon.classList.remove('hidden');
                     statusMessage.textContent = 'Download completed successfully!';
                     
+                    // Safely get data properties with fallbacks
+                    const message = data.message || 'Ready to download!';
+                    const downloadUrl = data.download_url || '#';
+                    const filename = data.filename || 'youtube-video';
+                    
                     // Display a success message
                     const downloadMessage = document.createElement('div');
                     downloadMessage.className = 'download-message';
-                    downloadMessage.innerHTML = `<i class="fas fa-check-circle"></i> ${data.message}`;
+                    downloadMessage.innerHTML = `<i class="fas fa-check-circle"></i> ${message}`;
                     downloadResult.appendChild(downloadMessage);
                     
-                    // Create a download button for the direct stream
-                    const downloadBtn = document.createElement('a');
-                    downloadBtn.className = 'stream-download-btn';
-                    downloadBtn.href = data.download_url;
-                    downloadBtn.innerHTML = `<i class="fas fa-download"></i> Download ${data.filename}`;
-                    downloadBtn.download = data.filename; // Suggest filename to browser
-                    downloadResult.appendChild(downloadBtn);
-                    
-                    // Add a note that clicking will start the download
-                    const noteText = document.createElement('div');
-                    noteText.className = 'note-text';
-                    noteText.innerHTML = `<i class="fas fa-info-circle"></i> Click the button above to download directly to your device`;
-                    downloadResult.appendChild(noteText);
+                    // Only create download button if we have a valid URL
+                    if (downloadUrl && downloadUrl !== '#') {
+                        // Create a download button for the direct stream
+                        const downloadBtn = document.createElement('a');
+                        downloadBtn.className = 'stream-download-btn';
+                        downloadBtn.href = downloadUrl;
+                        downloadBtn.innerHTML = `<i class="fas fa-download"></i> Download ${filename}`;
+                        downloadBtn.download = filename; // Suggest filename to browser
+                        downloadResult.appendChild(downloadBtn);
+                        
+                        // Add a note that clicking will start the download
+                        const noteText = document.createElement('div');
+                        noteText.className = 'note-text';
+                        noteText.innerHTML = `<i class="fas fa-info-circle"></i> Click the button above to download directly to your device`;
+                        downloadResult.appendChild(noteText);
+                    } else {
+                        // If download URL is missing, show an error
+                        const errorText = document.createElement('div');
+                        errorText.className = 'note-text error';
+                        errorText.innerHTML = `<i class="fas fa-exclamation-triangle"></i> Download link unavailable. Try refreshing the page.`;
+                        downloadResult.appendChild(errorText);
+                    }
                 })
                 .catch(error => {
                     // Show error
@@ -657,6 +719,50 @@
                     spinner.classList.add('hidden');
                 });
             });
+            
+            // Function to poll the status of an asynchronous download job
+            function pollDownloadStatus(jobId) {
+                return new Promise((resolve, reject) => {
+                    // Show polling status in UI
+                    statusMessage.textContent = 'Download in progress. Please wait...';
+                    
+                    // Set up progress tracking
+                    let lastProgress = 0;
+                    
+                    // Function to check status
+                    function checkStatus() {
+                        fetch(`/download-status/${jobId}`)
+                            .then(response => response.json())
+                            .then(data => {
+                                // Update progress bar
+                                if (data.progress > lastProgress) {
+                                    lastProgress = data.progress;
+                                    progressBar.style.width = `${Math.min(90, data.progress)}%`;
+                                }
+                                
+                                // Check job status
+                                if (data.status === 'completed') {
+                                    // Job complete - return the data
+                                    resolve(data);
+                                } else if (data.status === 'failed') {
+                                    // Job failed
+                                    reject(new Error(data.error || 'Download failed'));
+                                } else {
+                                    // Still pending, continue polling
+                                    statusMessage.textContent = `Download in progress: ${data.progress}% complete...`;
+                                    setTimeout(checkStatus, 2000); // Poll every 2 seconds
+                                }
+                            })
+                            .catch(error => {
+                                // Error during status check
+                                reject(error);
+                            });
+                    }
+                    
+                    // Start polling
+                    checkStatus();
+                });
+            }
         });
     </script>
 </body>

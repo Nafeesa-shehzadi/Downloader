@@ -3,10 +3,18 @@ import uuid
 import subprocess
 import traceback
 import yt_dlp
-from flask import Flask, render_template, request, jsonify, send_from_directory
+import time
+import socket
+import threading
+from flask import Flask, render_template, request, jsonify, send_from_directory, stream_with_context, Response
+from werkzeug.serving import is_running_from_reloader
+from threading import Thread
 
 # Import our YouTube helper module with enhanced anti-bot protection
 import youtube_helper
+
+# Set socket timeout globally to prevent hanging connections
+socket.setdefaulttimeout(30)
 
 app = Flask(__name__)
 
@@ -130,27 +138,122 @@ def download_video():
         return jsonify({"error": str(e)}), 500
 
 
-@app.route('/stream-download', methods=['GET'])
-def stream_download():
-    """Stream a YouTube video/audio directly to the browser"""
+# Background download queue for handling Railway timeouts
+download_queue = {}
+
+@app.route('/initiate-download', methods=['GET'])
+def initiate_download():
+    """Initiate an asynchronous download process and return a job ID"""
     video_url = request.args.get('url')
     format_type = request.args.get('format', 'video')
     quality = request.args.get('quality', 'best')
     
     if not video_url:
-        return "No URL provided", 400
+        return jsonify({"error": "No URL provided"}), 400
+    
+    # Generate a job ID
+    job_id = str(uuid.uuid4())
+    
+    # Set up the job in the queue
+    download_queue[job_id] = {
+        'status': 'pending',
+        'progress': 0,
+        'file_path': None,
+        'error': None,
+        'info': None,
+        'started_at': time.time()
+    }
+    
+    # Start background download thread
+    download_thread = Thread(target=background_download, 
+                            args=(job_id, video_url, format_type, quality))
+    download_thread.daemon = True
+    download_thread.start()
+    
+    return jsonify({
+        'job_id': job_id,
+        'status': 'pending',
+        'message': 'Download initiated. Check status with /download-status endpoint.'
+    })
+
+@app.route('/download-status/<job_id>', methods=['GET'])
+def download_status(job_id):
+    """Check the status of a download job"""
+    if job_id not in download_queue:
+        return jsonify({'error': 'Invalid job ID'}), 404
+    
+    job = download_queue[job_id]
+    
+    # Check for timeout (10 minutes)
+    if job['status'] == 'pending' and (time.time() - job['started_at']) > 600:
+        job['status'] = 'failed'
+        job['error'] = 'Download timed out after 10 minutes'
+    
+    response = {
+        'status': job['status'],
+        'progress': job['progress']
+    }
+    
+    if job['status'] == 'completed':
+        # Add download info
+        response['download_url'] = f"/download-file/{job_id}"
+        if job['info'] and 'title' in job['info']:
+            response['title'] = job['info']['title']
+            # Create safe filename
+            safe_title = ''.join(c for c in job['info']['title'] if c.isalnum() or c in ' -_').strip()
+            safe_title = safe_title.replace(' ', '_')
+            response['filename'] = f"{safe_title}.{'mp3' if format_type == 'audio' else 'mp4'}"
+    elif job['status'] == 'failed':
+        response['error'] = job['error']
+    
+    return jsonify(response)
+
+@app.route('/download-file/<job_id>', methods=['GET'])
+def download_file(job_id):
+    """Download the processed file"""
+    if job_id not in download_queue:
+        return "Invalid job ID", 404
+    
+    job = download_queue[job_id]
+    
+    if job['status'] != 'completed' or not job['file_path'] or not os.path.exists(job['file_path']):
+        return "File not ready or no longer available", 404
+    
+    # Determine content type based on file extension
+    content_type = 'audio/mpeg' if job['file_path'].endswith('.mp3') else 'video/mp4'
+    
+    # Create safe filename
+    filename = "download.mp4"
+    if job['info'] and 'title' in job['info']:
+        safe_title = ''.join(c for c in job['info']['title'] if c.isalnum() or c in ' -_').strip()
+        safe_title = safe_title.replace(' ', '_')
+        filename = f"{safe_title}.{'mp3' if job['file_path'].endswith('.mp3') else 'mp4'}"
+    
+    # Stream the file to avoid timeout issues
+    return send_from_directory(
+        os.path.dirname(job['file_path']),
+        os.path.basename(job['file_path']),
+        mimetype=content_type,
+        as_attachment=True,
+        download_name=filename
+    )
+
+def background_download(job_id, video_url, format_type, quality):
+    """Background thread for downloading YouTube content"""
+    job = download_queue[job_id]
     
     try:
         # Create temporary file path
-        temp_file = os.path.join(DOWNLOAD_FOLDER, f"temp_{uuid.uuid4()}.{'.mp3' if format_type == 'audio' else '.mp4'}")
+        temp_file = os.path.join(DOWNLOAD_FOLDER, f"temp_{job_id}.{'.mp3' if format_type == 'audio' else '.mp4'}")
         
         # Basic download options
         base_opts = {
             'outtmpl': temp_file,
-            'quiet': False,  # Let's see output for debugging
+            'quiet': False,  # Output for debugging
+            'progress_hooks': [lambda d: update_progress(job_id, d)],
         }
         
-        print(f"Downloading {video_url} with enhanced protection")
+        print(f"[Job {job_id}] Downloading {video_url} with enhanced protection")
         
         # Add audio post-processing if needed
         if format_type == 'audio':
@@ -193,68 +296,70 @@ def stream_download():
             try:
                 with yt_dlp.YoutubeDL(enhanced_opts) as ydl:
                     # Verbose output for debugging
-                    print(f"Download attempt {attempt+1} with options: {enhanced_opts}")
+                    print(f"[Job {job_id}] Download attempt {attempt+1}")
                     info = ydl.extract_info(video_url, download=True)
                     
                     # Check if download succeeded
                     if info and 'requested_downloads' in info and info['requested_downloads']:
                         downloaded_file = info['requested_downloads'][0].get('_filename', temp_file)
                         if os.path.exists(downloaded_file):
-                            print(f"Successfully downloaded on attempt {attempt+1}")
+                            print(f"[Job {job_id}] Successfully downloaded on attempt {attempt+1}")
                             break
                     else:
-                        print(f"Download info not available in attempt {attempt+1}")
+                        print(f"[Job {job_id}] Download info not available in attempt {attempt+1}")
             except Exception as e:
-                print(f"Error in download attempt {attempt+1}: {str(e)}")
+                print(f"[Job {job_id}] Error in download attempt {attempt+1}: {str(e)}")
                 # Try with different settings on next attempt
                 enhanced_opts = youtube_helper.get_enhanced_ydl_opts(base_opts, format_type)
         
         # Check if any of the attempts succeeded
         if not downloaded_file or not os.path.exists(downloaded_file):
-            return "Download failed after multiple attempts. YouTube may be blocking access.", 500
-                
-            # Generate a safe filename for the browser
-            safe_title = ''.join(c for c in info['title'] if c.isalnum() or c in ' -_').strip()
-            safe_title = safe_title.replace(' ', '_')
-            
-            # Add short indicator if it's a YouTube Short
-            if 'youtube.com/shorts/' in video_url:
-                safe_title = f"Short_{safe_title}"
-                
-            # Determine content type and file extension
-            if format_type == 'audio':
-                content_type = 'audio/mpeg'
-                filename = f"{safe_title}.mp3"
-            else:
-                content_type = 'video/mp4'
-                filename = f"{safe_title}.mp4"
-            
-            # Stream the file to the browser
-            def generate():
-                with open(downloaded_file, 'rb') as f:
-                    while True:
-                        chunk = f.read(1024 * 1024)  # 1MB chunks
-                        if not chunk:
-                            break
-                        yield chunk
-                # Delete the temp file after streaming
-                try:
-                    os.remove(downloaded_file)
-                except:
-                    pass
-                    
-            response = app.response_class(
-                generate(),
-                mimetype=content_type,
-                direct_passthrough=True
-            )
-            response.headers.set('Content-Disposition', f'attachment; filename="{filename}"')
-            return response
-                
+            job['status'] = 'failed'
+            job['error'] = 'Download failed after multiple attempts. YouTube may be blocking access.'
+            return
+        
+        # Mark job as completed
+        job['status'] = 'completed'
+        job['file_path'] = downloaded_file
+        job['info'] = info
+        job['progress'] = 100
+        print(f"[Job {job_id}] Download complete: {downloaded_file}")
+        
     except Exception as e:
         error_details = traceback.format_exc()
-        print(f"Error streaming: {error_details}")
-        return f"Error: {str(e)}", 500
+        print(f"[Job {job_id}] Error: {error_details}")
+        job['status'] = 'failed'
+        job['error'] = str(e)
+
+def update_progress(job_id, progress_data):
+    """Update the progress of a download job"""
+    if job_id in download_queue:
+        job = download_queue[job_id]
+        
+        if progress_data.get('status') == 'downloading':
+            # Calculate progress percentage
+            downloaded = progress_data.get('downloaded_bytes', 0)
+            total = progress_data.get('total_bytes') or progress_data.get('total_bytes_estimate', 0)
+            
+            if total > 0:
+                progress = int((downloaded / total) * 100)
+                job['progress'] = min(progress, 99)  # Cap at 99% until fully complete
+
+@app.route('/stream-download', methods=['GET'])
+def stream_download():
+    """Legacy endpoint - now redirects to the new asynchronous download system"""
+    video_url = request.args.get('url')
+    format_type = request.args.get('format', 'video')
+    quality = request.args.get('quality', 'best')
+    
+    if not video_url:
+        return "No URL provided", 400
+    
+    # Redirect to the new async download flow
+    return jsonify({
+        "error": "This endpoint is deprecated. Please use the new download flow.",
+        "redirect": f"/initiate-download?url={video_url}&format={format_type}&quality={quality}"
+    }), 302
 
 # We don't need this route anymore since files are saved directly to Downloads folder
 # @app.route('/downloads/<path:filename>', methods=['GET'])
