@@ -37,6 +37,10 @@ def download_video():
         video_info = None
         file_extension = 'mp4'  # Default extension
         
+        # Log the request details for debugging
+        print(f"Processing request - URL: {video_url}, Format: {format_type}, Quality: {quality}")
+        print(f"Request headers: {dict(request.headers)}")
+        
         try:
             # Use our enhanced YouTube helper to get video info with anti-bot protection
             print(f"Getting info for {video_url} with enhanced protection")
@@ -46,9 +50,23 @@ def download_video():
                 quality=quality,
                 skip_download=True
             )
+            
+            # Log success for debugging
+            if video_info:
+                print(f"Successfully retrieved info for video: {video_info.get('title', 'Unknown')}")
         except Exception as e:
-            print(f"Error with enhanced protection: {str(e)}")
-            return jsonify({"error": f"YouTube is blocking this request. Please try again later or with a different video."}), 500
+            error_message = str(e)
+            print(f"Error with enhanced protection: {error_message}")
+            
+            # Provide more specific error messages based on the error
+            if "sign in to confirm you're not a bot" in error_message.lower() or "confirm your identity" in error_message.lower():
+                return jsonify({"error": "YouTube's anti-bot protection is blocking this request. We're actively working on a solution."}), 429
+            elif "unavailable" in error_message.lower() or "private" in error_message.lower():
+                return jsonify({"error": "This video is unavailable or private."}), 404
+            elif "copyright" in error_message.lower():
+                return jsonify({"error": "This video is blocked due to copyright restrictions."}), 403
+            else:
+                return jsonify({"error": f"YouTube is blocking this request. Please try again later or with a different video."}), 500
         
         # Define basic info options
         info_opts = {
